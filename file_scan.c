@@ -100,6 +100,7 @@ int add_file(const char *name, int dirfd)
 	struct filerec *file;
 	uint64_t subvolid;
 	dev_t dev;
+	char abspath[PATH_MAX];
 
 	if (len > (path_max - pathp)) {
 		fprintf(stderr, "Path max exceeded: %s %s\n", path, name);
@@ -196,7 +197,12 @@ int add_file(const char *name, int dirfd)
 
 	close(fd);
 
-	file = filerec_new(path, st.st_ino, subvolid);
+	if (realpath(path, abspath) == NULL) {
+		ret = errno;
+		goto out;
+	}
+
+	file = filerec_new(abspath, st.st_ino, subvolid);
 	if (file == NULL) {
 		fprintf(stderr, "Out of memory while allocating file record "
 			"for: %s\n", path);
