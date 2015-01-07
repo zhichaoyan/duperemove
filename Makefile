@@ -8,10 +8,10 @@ MANPAGES=duperemove.8 btrfs-extent-same.8 hashstats.8 show-shared-extents.8
 HEADERS=csum.h hash-tree.h results-tree.h kernel.h list.h rbtree.h dedupe.h \
 	btrfs-ioctl.h filerec.h btrfs-util.h debug.h util.h serialize.h \
 	memstats.h file_scan.h find_dupes.h run_dedupe.h xxhash.h \
-	sha256.h sha256-config.h bswap.h
+	sha256.h sha256-config.h bswap.h btrfs-internal.h
 CFILES=duperemove.c hash-tree.c results-tree.c rbtree.c dedupe.c filerec.c \
 	btrfs-util.c util.c serialize.c memstats.c file_scan.c find_dupes.c \
-	run_dedupe.c csum.c
+	run_dedupe.c csum.c btrfs-internal.c
 hash_CFILES=csum-xxhash.c xxhash.c csum-murmur3.c csum-sha256.c sha256.c
 
 CFILES += $(hash_CFILES)
@@ -19,7 +19,6 @@ CFILES += $(hash_CFILES)
 hashstats_CFILES=hashstats.c
 btrfs_extent_same_CFILES=btrfs-extent-same.c
 csum_test_CFILES=csum-test.c
-
 DIST_CFILES:=$(CFILES) $(hashstats_CFILES) $(btrfs_extent_same_CFILES) \
 	$(csum_test_CFILES)
 DIST_SOURCES:=$(DIST_CFILES) $(HEADERS) LICENSE LICENSE.xxhash Makefile \
@@ -35,8 +34,10 @@ hashstats_obj = $(hash_obj) rbtree.o hash-tree.o filerec.o util.o serialize.o \
 	 results-tree.o csum.o
 show_shared_obj = rbtree.o util.o
 csum_test_obj = $(hash_obj) util.o csum.o
+btrfs_test_obj = rbtree.o util.o btrfs-internal.o
 
-progs = duperemove hashstats btrfs-extent-same show-shared-extents csum-test
+progs = duperemove hashstats btrfs-extent-same show-shared-extents csum-test \
+	btrfs-test
 
 glib_CFLAGS=$(shell pkg-config --cflags glib-2.0)
 glib_LIBS=$(shell pkg-config --libs glib-2.0)
@@ -96,6 +97,9 @@ show-shared-extents: $(show_shared_obj) filerec.c
 
 hashstats: $(hashstats_obj) hashstats.c
 	$(CC) $(CFLAGS) $(hashstats_obj) hashstats.c -o hashstats $(LIBRARY_FLAGS)
+
+btrfs-test: $(btrfs_test_obj) btrfs-util.c
+	$(CC) $(CFLAGS) -DBTRFS_UTIL_TEST btrfs-util.c $(btrfs_test_obj) -o btrfs-test $(LIBRARY_FLAGS)
 
 clean:
 	rm -fr $(objects) $(progs) $(DIST_TARBALL) btrfs-extent-same filerec-test show-shared-extents hashstats csum-*.o *~
