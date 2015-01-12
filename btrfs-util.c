@@ -85,9 +85,9 @@ typedef int (subvol_changed_cb)(uint64_t subvolid, int fd,
 				struct btrfs_file_extent_item *item,
 				u64 found_gen,
 				struct name_lookup_cache *cache);
-static int subvol_find_updated_files(int fd, u64 root_id, u64 oldest_gen,
-				     u64 *max_gen_found,
-				     subvol_changed_cb *callback)
+static int subvol_find_updated_extents(int fd, u64 root_id, u64 oldest_gen,
+				       u64 *max_gen_found,
+				       subvol_changed_cb *callback)
 {
 	int ret;
 	struct btrfs_ioctl_search_args args;
@@ -271,8 +271,8 @@ static int do_find_new(char *subvol_path, uint64_t subvol_gen)
 		return -1;
 	}
 
-	ret = subvol_find_updated_files(fd, 0, subvol_gen, &max_gen,
-					print_changes);
+	ret = subvol_find_updated_extents(fd, 0, subvol_gen, &max_gen,
+					  print_changes);
 	if (ret) {
 		fprintf(stderr, "Error %d finding changes\n", ret);
 		return ret;
