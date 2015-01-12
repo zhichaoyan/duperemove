@@ -37,6 +37,7 @@ struct filerec *filerec_new(const char *filename, uint64_t inum,
 void filerec_free(struct filerec *file);
 int filerec_open(struct filerec *file, int write);
 void filerec_close(struct filerec *file);
+struct filerec *find_filerec(uint64_t inum, uint64_t subvolid);
 
 struct open_once {
 	struct rb_root	root;

@@ -29,9 +29,11 @@ struct hash_file_header {
 	__le64		num_files;
 /*20*/	__le64		num_hashes;
 	__le32		block_size; /* In bytes */
-	__le32		pad0;
+	__le32		num_subvol_info;
 	char		hash_type[8];
-	__le64		pad1[9];
+	__le64		subvol_info_off; /* Absolute offset of start of subvol
+					  * info */
+	__le64		pad1[8];
 };
 
 #define DISK_DIGEST_LEN		32
@@ -55,6 +57,20 @@ struct file_info {
 	char		name[0];
 };
 
+#define	UUID_SIZE	16
+struct subvol_info {
+	__le64	subvolid;
+	__le64	last_gen;
+	__le64	pad[2];
+	__le64	uuid[UUID_SIZE];
+	__le32	pad1;
+	__le16	rec_len;
+	__le16	path_len;
+	__le64	pad3[3];
+	char	path[0];
+};
+
+struct hash_tree;
 int serialize_hash_tree(char *filename, struct hash_tree *tree,
 			unsigned int block_size);
 

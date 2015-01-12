@@ -36,6 +36,7 @@
 #include "csum.h"
 #include "filerec.h"
 #include "hash-tree.h"
+#include "btrfs-util.h"
 
 #include "serialize.h"
 
@@ -53,6 +54,8 @@ static void debug_print_header(struct hash_file_header *h)
 	dprintf("num_files: %"PRIu64"\t", le64_to_cpu(h->num_files));
 	dprintf("num_hashes: %"PRIu64"\t", le64_to_cpu(h->num_hashes));
 	dprintf("block_size: %u\t", le32_to_cpu(h->block_size));
+	dprintf("num_subvol_info: %u\t", le32_to_cpu(h->num_subvol_info));
+	dprintf("subvol_info_off: %"PRIu64"\t", le64_to_cpu(h->subvol_info_off));
 	dprintf("hash_type: %.*s\t", 8, h->hash_type);
 	dprintf(" ]\n");
 }
@@ -72,7 +75,7 @@ static void debug_print_file_info(struct file_info *f)
 }
 
 static int write_header(int fd, uint64_t num_files, uint64_t num_hashes,
-			uint32_t block_size)
+			uint64_t subvol_info_off, uint32_t block_size)
 {
 	int written;
 	int ret = 0;
@@ -88,13 +91,17 @@ static int write_header(int fd, uint64_t num_files, uint64_t num_hashes,
 	disk->num_files = cpu_to_le64(num_files);
 	disk->num_hashes = cpu_to_le64(num_hashes);
 	disk->block_size = cpu_to_le32(block_size);
+	disk->num_subvol_info = cpu_to_le32(num_subvols);
 	memcpy(disk->hash_type, hash_type, 8);
+	disk->subvol_info_off = cpu_to_le64(subvol_info_off);
 
 	err = lseek(fd, 0, SEEK_SET);
 	if (err == (loff_t)-1) {
 		ret = errno;
 		goto out;
 	}
+
+	debug_print_header(disk);
 
 	written = write(fd, disk, sizeof(struct hash_file_header));
 	if (written == -1) {
@@ -163,20 +170,75 @@ static int write_one_hash(int fd, uint64_t loff, uint32_t flags,
 	return 0;
 }
 
+static int write_one_subvol(int fd, uint64_t id, uint64_t gen, char *uuid,
+			    char *path)
+{
+	int written, path_len = strlen(path);
+	struct subvol_info info = { 0, };
+
+	info.subvolid = cpu_to_le64(id);
+	info.last_gen = cpu_to_le64(gen);
+	memcpy(info.uuid, uuid, UUID_SIZE);
+	info.path_len = cpu_to_le16(path_len);
+	info.rec_len = cpu_to_le16(path_len + sizeof(struct subvol_info));
+
+	written = write(fd, &info, sizeof(struct subvol_info));
+	if (written == -1)
+		return errno;
+	if (written != sizeof(struct subvol_info))
+		return EIO;
+
+	written = write(fd, path, path_len);
+	if (written == -1)
+		return errno;
+	if (written != path_len)
+		return EIO;
+
+	return 0;
+}
+
+static int write_subvol_info(int fd, uint64_t *subvol_info_off)
+{
+	int ret = 0;
+	struct rb_node *n = rb_first(&subvols_by_id);
+	struct btrfs_subvol *subvol;
+	loff_t eof;
+
+	eof = lseek(fd, 0, SEEK_END);
+	if (eof == (loff_t)-1)
+		return errno;
+
+	*subvol_info_off = eof;
+
+	while (n) {
+		subvol = rb_entry(n, struct btrfs_subvol, subvol_node);
+
+		ret = write_one_subvol(fd, subvol->subvol_id,
+				       subvol->subvol_gen, subvol->subvol_uuid,
+				       subvol->subvol_path);
+		if (ret)
+			break;
+
+		n = rb_next(n);
+	}
+
+	return ret;
+}
+
 int serialize_hash_tree(char *filename, struct hash_tree *tree,
 			unsigned int block_size)
 {
 	int ret, fd;
 	struct filerec *file;
 	struct file_block *block;
-	uint64_t tot_files, tot_hashes;
+	uint64_t tot_files, tot_hashes, subvol_info_off = 0ULL;
 
 	fd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644);
 	if (fd == -1)
 		return errno;
 
 	/* Write the header first with zero files */
-	ret = write_header(fd, 0, 0, block_size);
+	ret = write_header(fd, 0, 0, 0, block_size);
 	if (ret)
 		goto out;
 
@@ -200,8 +262,15 @@ int serialize_hash_tree(char *filename, struct hash_tree *tree,
 		}
 	}
 
+	if (num_subvols) {
+		ret = write_subvol_info(fd, &subvol_info_off);
+		if (ret)
+			goto out;
+	}
+
 	/* When we're done, rewrite the header */
-	ret = write_header(fd, tot_files, tot_hashes, block_size);
+	ret = write_header(fd, tot_files, tot_hashes, subvol_info_off,
+			   block_size);
 
 out:
 	close(fd);
@@ -299,13 +368,64 @@ static int read_header(int fd, struct hash_file_header *h)
 	return 0;
 }
 
+static int read_one_subvol_info(int fd)
+{
+	int ret, path_len;
+	struct subvol_info info;
+	char path[PATH_MAX+1];
+
+	ret = read(fd, &info, sizeof(struct subvol_info));
+	if (ret == -1)
+		return errno;
+	if (ret != sizeof(struct subvol_info))
+		return EIO;
+
+	path_len = le16_to_cpu(info.path_len);
+
+	ret = read(fd, path, path_len);
+	if (ret == -1)
+		return errno;
+	if (ret != path_len)
+		return EIO;
+
+	path[path_len] = '\0';
+
+	ret = record_btrfs_subvol(fd, le64_to_cpu(info.subvolid),
+				  le64_to_cpu(info.last_gen), path);
+	return ret;
+}
+
+static int read_subvol_info(int fd, uint64_t subvol_info_off,
+			    uint32_t num_subvol_info)
+{
+	int ret = 0;
+	loff_t off;
+
+	if (!subvol_info_off)
+		return 0;
+
+	off = lseek(fd, subvol_info_off, SEEK_SET);
+	if (off == (loff_t)-1)
+		return errno;
+
+	while (num_subvol_info) {
+		ret = read_one_subvol_info(fd);
+		if (ret)
+			break;
+
+		num_subvol_info--;
+	}
+
+	return ret;
+}
+
 int read_hash_tree(char *filename, struct hash_tree *tree,
 		   unsigned int *block_size, struct hash_file_header *ret_hdr,
 		   int ignore_hash_type)
 {
 	int ret, fd;
-	uint32_t i;
-	uint64_t num_files;
+	uint32_t i, num_subvol_info;
+	uint64_t num_files, subvol_info_off;
 	struct hash_file_header h;
 
 	memset(&h, 0, sizeof(struct hash_file_header));
@@ -353,8 +473,13 @@ int read_hash_tree(char *filename, struct hash_tree *tree,
 	for (i = 0; i < num_files; i++) {
 		ret = read_one_file(fd, tree);
 		if (ret)
-			break;
+			goto out;
 	}
+
+	subvol_info_off = le32_to_cpu(h.subvol_info_off);
+	num_subvol_info = le32_to_cpu(h.num_subvol_info);
+	ret = read_subvol_info(fd, subvol_info_off, num_subvol_info);
+
 out:
 	if (ret == 0 && ret_hdr)
 		memcpy(ret_hdr, &h, sizeof(struct hash_file_header));

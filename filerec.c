@@ -203,7 +203,7 @@ static void insert_filerec(struct filerec *file)
 	return;
 }
 
-static struct filerec *find_filerec(uint64_t inum, uint64_t subvolid)
+struct filerec *find_filerec(uint64_t inum, uint64_t subvolid)
 {
 	int c;
 	struct rb_node *n = filerec_by_inum.rb_node;

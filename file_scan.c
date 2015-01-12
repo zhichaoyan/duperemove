@@ -179,7 +179,7 @@ int add_file(const char *name, int dirfd)
 		 * can have the same i_ino. Get the subvolume id of
 		 * our file so hard link detection works.
 		 */
-		ret = lookup_btrfs_subvolid(fd, &subvolid);
+		ret = find_btrfs_subvol_from_file(fd, path, &subvolid);
 		if (ret) {
 			close(fd);
 			fprintf(stderr,

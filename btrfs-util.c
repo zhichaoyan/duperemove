@@ -19,19 +19,155 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <sys/statfs.h>
+#include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <inttypes.h>
 #include <errno.h>
 #include <string.h>
 #include <linux/magic.h>
 #include <linux/btrfs.h>
+#include <stddef.h>
+#include <libgen.h>
+#include <limits.h>
 
+#include "rbtree.h"
+#include "kernel.h"
+
+#ifdef BTRFS_UTIL_TEST
+#include "filerec.h"
+#include "list.h"
+#include "csum.h"
+#include "hash-tree.h"
+#include "serialize.h"
+#endif
 #include "btrfs-internal.h"
 #include "btrfs-util.h"
 #include "debug.h"
 
-/* For some reason linux/btrfs.h doesn't define this. */
-#define	BTRFS_FIRST_FREE_OBJECTID	256ULL
+static unsigned int on_btrfs = 0;
+
+/*
+ * Every btrfs subvolume has a unique id. Getting subvol id from an
+ * inode is easy - see lookup_btrfs_subvolid().  The ids can be reused
+ * though if a subvolume is deleted.
+ *
+ * To get a truly unique identifier we have to look up subvolume uuid,
+ * but this takes more work than getting the id - we have to search
+ * the tree of roots to find the correct root_item and get uuid off
+ * that. We don't want to do this for every inode scanned.
+ *
+ * So as a compromise, we'll assume that the user isn't going to be
+ * created and deleteing subvolumes underneath us. Given that
+ * assumption, we're safe using subvolid as a unique identifier until
+ * we have to store that data in a hash file. If we're going to store
+ * this information on disk, we go back to the tree by ids and get the
+ * uuid for each one.
+ */
+struct rb_root subvols_by_id = RB_ROOT;
+struct rb_root subvols_by_uuid = RB_ROOT;
+unsigned int num_subvols = 0;
+
+static struct btrfs_subvol *find_btrfs_subvol_rb(uint64_t subvolid)
+{
+	struct rb_node *n = subvols_by_id.rb_node;
+	struct btrfs_subvol *s;
+
+	while (n) {
+		s = rb_entry(n, struct btrfs_subvol, subvol_node);
+		if (s->subvol_id > subvolid)
+			n = n->rb_left;
+		else if (s->subvol_id < subvolid)
+			n = n->rb_right;
+		else
+			return s;
+	}
+	return NULL;
+}
+
+static void insert_btrfs_subvol_rb(struct btrfs_subvol *s2)
+{
+	struct rb_node **p = &subvols_by_id.rb_node;
+	struct rb_node *parent = NULL;
+	struct btrfs_subvol *s1;
+
+	while (*p) {
+		parent = *p;
+
+		s1 = rb_entry(parent, struct btrfs_subvol, subvol_node);
+
+		if (s1->subvol_id > s2->subvol_id)
+			p = &(*p)->rb_left;
+		else if (s1->subvol_id < s2->subvol_id)
+			p = &(*p)->rb_right;
+		else
+			abort_lineno(); /* We should never find a duplicate */
+	}
+
+	rb_link_node(&s2->subvol_node, parent, p);
+	rb_insert_color(&s2->subvol_node, &subvols_by_id);
+	num_subvols++;
+}
+
+/*
+ * work backwards from filename to a subvol path
+ */
+static int find_subvol_path(char *filename, char **subvol_path)
+{
+	int ret;
+	char pathtmp[PATH_MAX+1];
+	char *path;
+
+	path = realpath(filename, pathtmp);
+	if (!path)
+		return errno;
+
+test_subvol:
+	ret = test_issubvolume(path);
+	if (ret < 0)
+		return ret;
+	if (ret == 1)
+		goto success;
+
+	abort_on(path[0] != '/');
+	if (strlen(path) == 1 && path[0] == '/')
+		goto success;
+
+	path = dirname(path);
+	goto test_subvol;
+
+success:
+	*subvol_path = strdup(path);
+	if (!(*subvol_path))
+		return ENOMEM;
+	return 0;
+}
+
+int record_btrfs_subvol(int fd, uint64_t subvolid, uint64_t gen, char *path)
+{
+	struct btrfs_subvol *s;
+
+	s = find_btrfs_subvol_rb(subvolid);
+	if (s)
+		return 0;
+
+	s = calloc(sizeof(*s), 1);
+	if (!s)
+		return ENOMEM;
+
+	s->subvol_id = subvolid;
+	s->subvol_gen = gen;
+	rb_init_node(&s->subvol_node);
+
+	s->subvol_path = strdup(path);
+	if (!s->subvol_path) {
+		free(s);
+		return ENOMEM;
+	}
+
+	insert_btrfs_subvol_rb(s);
+
+	return 0;
+}
 
 /*
  * For a given:
@@ -40,7 +176,7 @@
  * - BTRFS_EMPTY_SUBVOL_DIR_OBJECTID (directory with ino == 2) the result is
  *   undefined and function returns -1
  */
-int lookup_btrfs_subvolid(int fd, uint64_t *subvolid)
+static int lookup_btrfs_subvolid(int fd, uint64_t *subvolid)
 {
 	int ret;
 	struct btrfs_ioctl_ino_lookup_args args;
@@ -57,6 +193,32 @@ int lookup_btrfs_subvolid(int fd, uint64_t *subvolid)
 	return 0;
 }
 
+int find_btrfs_subvol_from_file(int fd, char *filename, uint64_t *rootid)
+{
+	int ret;
+	uint64_t subvolid, max_gen;
+	char *subvol_path;
+
+	ret = lookup_btrfs_subvolid(fd, &subvolid);
+	if (ret)
+		return ret;
+
+	*rootid = subvolid;
+
+	max_gen = find_root_gen(fd);
+	if (!max_gen)
+		return EIO;
+
+	ret = find_subvol_path(filename, &subvol_path);
+	if (ret)
+		return ret;
+
+	ret = record_btrfs_subvol(fd, subvolid, max_gen, subvol_path);
+
+	free(subvol_path);
+	return ret;
+}
+
 int check_file_btrfs(int fd, int *btrfs)
 {
 	int ret;
@@ -69,7 +231,7 @@ int check_file_btrfs(int fd, int *btrfs)
 		return errno;
 
 	if (fs.f_type == BTRFS_SUPER_MAGIC)
-		*btrfs = 1;
+		*btrfs = on_btrfs = 1;
 
 	return ret;
 }
@@ -86,8 +248,8 @@ typedef int (subvol_changed_cb)(uint64_t subvolid, int fd,
 				u64 found_gen,
 				struct name_lookup_cache *cache);
 static int subvol_find_updated_extents(int fd, u64 root_id, u64 oldest_gen,
-				       u64 *max_gen_found,
-				       subvol_changed_cb *callback)
+				     u64 *max_gen_found,
+				     subvol_changed_cb *callback)
 {
 	int ret;
 	struct btrfs_ioctl_search_args args;
@@ -212,11 +374,20 @@ int sync_btrfs_fs(int fd)
  * Program to test our btrfs functionality.
  * Right now it only does a re-implementation of btrfs find-new.
  * Eventually:
- * btrfs-util what-changed hashfile
+ * btrfs-util show-changes hashfile
  * btrfs-util log2ino logical
  */
 static char *path = NULL;
 static uint64_t gen;
+
+int verbose = 0, debug = 0;
+unsigned int blocksize;
+
+static enum {
+	FIND_NEW,
+	SHOW_CHANGES
+} action;
+
 static int parse_opts(int argc, char **argv)
 {
 	if (argc < 2)
@@ -228,8 +399,137 @@ static int parse_opts(int argc, char **argv)
 		path = strdup(argv[2]);
 		abort_on(!path);
 		gen = atoll(argv[3]);
+		action = FIND_NEW;
+	} else if (strcmp(argv[1], "show-changes") == 0) {
+		if (argc != 3)
+			return -1;
+		path = strdup(argv[2]);
+		abort_on(!path);
+		action = SHOW_CHANGES;
 	} else {
 		return -1;
+	}
+
+	return 0;
+}
+
+static uint64_t extent_len_from_item(struct btrfs_file_extent_item *item)
+{
+	uint64_t len = 0;
+	unsigned int type;
+
+	type = btrfs_stack_file_extent_type(item);
+
+	if (type == BTRFS_FILE_EXTENT_REG ||
+	    type == BTRFS_FILE_EXTENT_PREALLOC)
+		len = btrfs_stack_file_extent_num_bytes(item);
+	else if (type == BTRFS_FILE_EXTENT_INLINE)
+		len = btrfs_stack_file_extent_ram_bytes(item);
+	else
+		fprintf(stderr, "WARNING: Unexpected extent type: %u\n", type);
+
+	return len;
+}
+
+int show_live_changes(uint64_t subvolid, int fd,
+		      struct btrfs_ioctl_search_header *sh,
+		      struct btrfs_file_extent_item *item,
+		      u64 found_gen,
+		      struct name_lookup_cache *cache)
+{
+	struct filerec *file;
+	uint64_t ino = sh->objectid;
+	uint64_t off = sh->offset;
+	uint64_t len = extent_len_from_item(item);
+
+	file = find_filerec(ino, subvolid);
+	if (!file)
+		return 0;
+
+	printf("subvol: %"PRIu64" ino: %"PRIu64" (\"%s\") changed from "
+	       "%"PRIu64" to %"PRIu64"\n", subvolid, ino, file->filename, off,
+	       len);
+
+	return 0;
+}
+
+static int show_one_subvol_changes(struct btrfs_subvol *subvol)
+{
+	int fd, ret;
+	uint64_t max_gen;
+
+	fd = open(subvol->subvol_path, O_RDONLY);
+	if (fd == -1) {
+		ret = errno;
+		fprintf(stderr, "Could not open %s: %d\n", subvol->subvol_path,
+			ret);
+		return ret;
+	}
+
+	if (!test_issubvolume(subvol->subvol_path)) {
+		fprintf(stderr, "%s is not a subvolume.\n",
+			subvol->subvol_path);
+		ret = -1;
+		goto out;
+	}
+
+	ret = sync_btrfs_fs(fd);
+	if (ret) {
+		ret = errno;
+		fprintf(stderr, "Could not sync %s: %d\n", subvol->subvol_path,
+			ret);
+		goto out;
+	}
+
+	ret = subvol_find_updated_extents(fd, subvol->subvol_id,
+					  subvol->subvol_gen, &max_gen,
+					  show_live_changes);
+	if (ret)
+		fprintf(stderr, "Error %d finding changes\n", ret);
+
+out:
+	close(fd);
+	return ret;
+}
+
+static int do_show_changes(char *hashfile)
+{
+	int ret;
+	struct rb_node *n;
+	struct btrfs_subvol *subvol;
+	struct hash_tree tree;
+
+	/*
+	 * Load the hashfile
+	 * Run subvol_find_updated_extents (rename to _extents)
+	 *    - lookup filerec by inode / subvol
+	 *    - if it exists, print it!
+	 */
+	printf("hashfile: %s\n", hashfile);
+
+	init_filerec();
+	init_hash_tree(&tree);
+
+	ret = init_csum_module(DEFAULT_HASH_STR);
+	if (ret) {
+		fprintf(stderr, "Could not init csum module\n");
+		return ret;
+	}
+
+	ret = read_hash_tree(hashfile, &tree, &blocksize, NULL, 0);
+	if (ret) {
+		fprintf(stderr,
+			"Error %d reading hashfile \"%s\".\n", ret, hashfile);
+		return ret;
+	}
+
+	n = rb_first(&subvols_by_id);
+	while (n) {
+		subvol = rb_entry(n, struct btrfs_subvol, subvol_node);
+
+		ret = show_one_subvol_changes(subvol);
+
+		n = rb_next(n);
 	}
 
 	return 0;
@@ -288,11 +588,21 @@ int main(int argc, char **argv)
 
 	if (parse_opts(argc, argv)) {
 		printf("tests duperemove btrfs functions.\nUsage:\n"
-		       "btrfs-util find-new subvolume last-gen\n");
+		       "btrfs-util find-new subvolume last-gen\n"
+		       "btrfs-util show-changes hashfile\n");
 		return 1;
 	}
 
-	ret = do_find_new(path, gen);
+	switch (action) {
+	case FIND_NEW:
+		ret = do_find_new(path, gen);
+		break;
+	case SHOW_CHANGES:
+		ret = do_show_changes(path);
+		break;
+	default:
+		abort_lineno();
+	}
 
 	return ret;
 }
