@@ -33,10 +33,11 @@ objects = $(CFILES:.c=.o)
 
 hash_obj=$(hash_CFILES:.c=.o)
 hashstats_obj = $(hash_obj) rbtree.o hash-tree.o filerec.o util.o serialize.o \
-	 results-tree.o csum.o d_tree.o bloom.o
+	 results-tree.o csum.o d_tree.o bloom.o btrfs-util.o btrfs-internal.o
 show_shared_obj = rbtree.o util.o
 csum_test_obj = $(hash_obj) util.o csum.o
-btrfs_test_obj = rbtree.o util.o btrfs-internal.o
+btrfs_test_obj = rbtree.o util.o btrfs-internal.o filerec.o hash-tree.o	\
+	$(hash_obj) csum.o serialize.o d_tree.o bloom.o
 
 progs = duperemove hashstats btrfs-extent-same show-shared-extents csum-test \
 	btrfs-test

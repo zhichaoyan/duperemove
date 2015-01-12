@@ -236,7 +236,7 @@ int add_file(const char *name, int dirfd)
 		 * can have the same i_ino. Get the subvolume id of
 		 * our file so hard link detection works.
 		 */
-		ret = lookup_btrfs_subvolid(fd, &subvolid);
+		ret = find_btrfs_subvol_from_file(fd, path, &subvolid);
 		if (ret) {
 			close(fd);
 			fprintf(stderr,
@@ -635,13 +635,14 @@ int populate_tree_swap(struct rb_root *tree, char *serialize_fname)
 	int ret = 0;
 	GMutex mutex;
 	GThreadPool *pool;
+	uint64_t subvol_info_off = 0ULL;;
 
 	struct thread_params params = { tree, 0, 0, 0, };
 
 	params.hfile = open(serialize_fname, O_WRONLY|O_CREAT|O_TRUNC, 0644);
 
 	/* Write a dummy header */
-	ret = write_header(params.hfile, 0, 0, blocksize);
+	ret = write_header(params.hfile, 0, 0, 0, blocksize);
 	if (ret)
 		goto out;
 
@@ -657,9 +658,15 @@ int populate_tree_swap(struct rb_root *tree, char *serialize_fname)
 
 	run_pool(pool);
 
+	if (num_subvols) {
+		ret = write_subvol_info(params.hfile, &subvol_info_off);
+		if (ret)
+			goto out;
+	}
+
 	/* Now, write the real header */
 	ret = write_header(params.hfile, params.num_files,
-			params.num_hashes, blocksize);
+			   params.num_hashes, subvol_info_off, blocksize);
 	if (ret)
 		goto out;
 

@@ -30,6 +30,7 @@
 #include "hash-tree.h"
 #include "util.h"
 #include "serialize.h"
+#include "btrfs-util.h"
 
 #include "bswap.h"
 
@@ -39,6 +40,7 @@ static int version_only = 0;
 static int print_all_hashes = 0;
 static int print_blocks = 0;
 static int num_to_print = 10;
+static int show_subvol_info = 0;
 static int print_file_list = 0;
 static char *serialize_fname = NULL;
 static struct rb_root by_size = RB_ROOT;
@@ -165,6 +167,26 @@ static void print_filerecs(void)
 	}
 }
 
+static void print_subvol_info(void)
+{
+	struct rb_node *n = rb_first(&subvols_by_id);
+	struct btrfs_subvol *subvol;
+
+	if (num_subvols)
+		printf("Showing %u subvolumes\nSubvol ID\tSubvol Gen\tUUID\tPath\n",
+		       num_subvols);
+
+	while (n) {
+		subvol = rb_entry(n, struct btrfs_subvol, subvol_node);
+
+		printf("%"PRIu64"\t%"PRIu64"\t%.*s\t%s\n", subvol->subvol_id,
+		       subvol->subvol_gen, UUID_SIZE, subvol->subvol_uuid,
+			subvol->subvol_path);
+
+		n = rb_next(n);
+	}
+}
+
 static void print_file_info(struct hash_tree *tree,
 			    struct hash_file_header *h)
 {
@@ -174,6 +196,9 @@ static void print_file_info(struct hash_tree *tree,
 	       le32_to_cpu(h->block_size));
 	printf("  num_files: %"PRIu64"\tnum_hashes: %"PRIu64"\n",
 	       le64_to_cpu(h->num_files), le64_to_cpu(h->num_hashes));
+	printf("  num_subvol_info: %u\tsubvol_info_off: %"PRIu64"\n",
+	       le32_to_cpu(h->num_subvol_info),
+	       le64_to_cpu(h->subvol_info_off));
 	printf("Loaded hashes from %"PRIu64" blocks into %"PRIu64" nodes\n",
 	       tree->num_blocks, tree->num_hashes);
 	printf("Loaded %llu file records\n", num_filerecs);
@@ -196,6 +221,7 @@ static void usage(const char *prog)
 	printf("\t-a\t\tPrint all hashes (overrides '-n', above)\n");
 	printf("\t-b\t\tPrint info on each block within our hash buckets\n");
 	printf("\t-l\t\tPrint a list of all files\n");
+	printf("\t-s\t\tPrint the subvolume info\n");
 	printf("\t--help\t\tPrints this help text.\n");
 }
 
@@ -217,7 +243,7 @@ static int parse_options(int argc, char **argv)
 	if (argc < 2)
 		return 1;
 
-	while ((c = getopt_long(argc, argv, "labn:?", long_ops, NULL))
+	while ((c = getopt_long(argc, argv, "labn:s?", long_ops, NULL))
 	       != -1) {
 		switch (c) {
 		case 'l':
@@ -231,6 +257,9 @@ static int parse_options(int argc, char **argv)
 			break;
 		case 'n':
 			num_to_print = atoi(optarg);
+			break;
+		case 's':
+			show_subvol_info = 1;
 			break;
 		case VERSION_OPTION:
 			version_only = 1;
@@ -275,6 +304,9 @@ int main(int argc, char **argv)
 	}
 
 	print_file_info(&tree, &h);
+
+	if (show_subvol_info)
+		print_subvol_info();
 
 	if (num_to_print || print_all_hashes) {
 		sort_by_size(&tree);
