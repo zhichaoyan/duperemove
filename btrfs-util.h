@@ -16,11 +16,14 @@
 #ifndef	__BTRFS_UTIL__
 #define	__BTRFS_UTIL__
 
+struct filerec;
+
 extern unsigned int num_subvols;
 extern struct rb_root subvols_by_id;
 
 int check_file_btrfs(int fd, int *btrfs);
 int find_btrfs_subvol_from_file(int fd, char *filename, uint64_t *rootid);
+int btrfs_check_file_changed(struct filerec *file, int *ret_changed);
 
 int record_btrfs_subvol(int fd, uint64_t subvolid, uint64_t gen, char *path);
 

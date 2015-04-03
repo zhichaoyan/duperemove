@@ -11,6 +11,8 @@ extern unsigned long long num_filerecs;
 struct filerec {
 	int		fd;			/* file descriptor */
 	unsigned int	fd_refs;			/* fd refcount */
+	unsigned int	flags;
+//	unsigned int	uptodate : 1;
 	char	*filename;		/* path to file */
 	uint64_t subvolid;
 
@@ -29,11 +31,38 @@ struct filerec {
 	struct rb_root		comparisons;
 };
 
+#define declare_filerec_flag_funcs(_flag, _name)			\
+static inline unsigned int filerec_##_name(struct filerec *file)	\
+{									\
+	return !!(file->flags & _flag);					\
+}									\
+static inline void filerec_set_##_name(struct filerec *file)		\
+{									\
+	file->flags |= _flag;						\
+}									\
+static inline void filerec_clear_##_name(struct filerec *file)		\
+{									\
+	file->flags &= ~_flag;						\
+}
+
+/* Set if the the file metadata (ino, subvol, etc) is known to be good */
+#define FILEREC_FLAG_META_UPTODATE	0x00000001
+declare_filerec_flag_funcs(FILEREC_FLAG_META_UPTODATE, meta_uptodate);
+/* Set if the file is on btrfs */
+#define FILEREC_FLAG_BTRFS	0x00000002
+declare_filerec_flag_funcs(FILEREC_FLAG_BTRFS, btrfs);
+/* Set if we need to re-hash the file */
+#define FILEREC_FLAG_DATA_UPTODATE	0x00000004
+declare_filerec_flag_funcs(FILEREC_FLAG_DATA_UPTODATE, data_uptodate);
+
 void init_filerec(void);
 void free_all_filerecs(void);
 
 struct filerec *filerec_new(const char *filename, uint64_t inum,
-			    uint64_t subvolid);
+			    uint64_t subvolid, int on_btrfs);
+
+void filerec_rehash(struct filerec *file, uint64_t inum, uint64_t subvolid,
+		    int on_btrfs);
 void filerec_free(struct filerec *file);
 int filerec_open(struct filerec *file, int write);
 void filerec_close(struct filerec *file);

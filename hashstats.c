@@ -297,7 +297,7 @@ int main(int argc, char **argv)
 	if (init_csum_module(DEFAULT_HASH_STR))
 		return ENOMEM;
 
-	ret = read_hash_tree(serialize_fname, &tree, &blocksize, &h, 0, NULL);
+	ret = read_hash_tree(serialize_fname, &tree, &blocksize, &h, 0, NULL, 0);
 	if (ret) {
 		print_hash_tree_errcode(stderr, serialize_fname, ret);
 		return ret;

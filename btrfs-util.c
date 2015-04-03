@@ -29,17 +29,21 @@
 #include <stddef.h>
 #include <libgen.h>
 #include <limits.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include "rbtree.h"
 #include "kernel.h"
-
-#ifdef BTRFS_UTIL_TEST
-#include "filerec.h"
 #include "list.h"
+
+#include "filerec.h"
+#ifdef BTRFS_UTIL_TEST
 #include "csum.h"
 #include "hash-tree.h"
 #include "serialize.h"
 #endif
+
 #include "btrfs-internal.h"
 #include "btrfs-util.h"
 #include "debug.h"
@@ -110,6 +114,7 @@ static void insert_btrfs_subvol_rb(struct btrfs_subvol *s2)
 
 /*
  * work backwards from filename to a subvol path
+ * XXX: Jokes on you, btrfs has an ioctl to resolve subvolid->path !!
  */
 static int find_subvol_path(char *filename, char **subvol_path)
 {
@@ -176,7 +181,7 @@ int record_btrfs_subvol(int fd, uint64_t subvolid, uint64_t gen, char *path)
  * - BTRFS_EMPTY_SUBVOL_DIR_OBJECTID (directory with ino == 2) the result is
  *   undefined and function returns -1
  */
-static int lookup_btrfs_subvolid(int fd, uint64_t *subvolid)
+static int __lookup_btrfs_subvolid(int fd, uint64_t *subvolid)
 {
 	int ret;
 	struct btrfs_ioctl_ino_lookup_args args;
@@ -193,13 +198,27 @@ static int lookup_btrfs_subvolid(int fd, uint64_t *subvolid)
 	return 0;
 }
 
+static int lookup_btrfs_subvolid(char *filename, uint64_t *subvolid)
+{
+	int fd, ret;
+
+	fd = open(filename, O_RDONLY);
+	if (fd == -1)
+		return errno;
+
+	ret = __lookup_btrfs_subvolid(fd, subvolid);
+
+	close(fd);
+	return ret;
+}
+
 int find_btrfs_subvol_from_file(int fd, char *filename, uint64_t *rootid)
 {
 	int ret;
 	uint64_t subvolid, max_gen;
 	char *subvol_path;
 
-	ret = lookup_btrfs_subvolid(fd, &subvolid);
+	ret = __lookup_btrfs_subvolid(fd, &subvolid);
 	if (ret)
 		return ret;
 
@@ -242,14 +261,16 @@ struct name_lookup_cache {
 	char	*dir_name;
 	char	*full_name;
 };
+/* callback can return nonzero to stop search */
 typedef int (subvol_changed_cb)(uint64_t subvolid, int fd,
 				struct btrfs_ioctl_search_header *sh,
 				struct btrfs_file_extent_item *item,
 				u64 found_gen,
-				struct name_lookup_cache *cache);
-static int subvol_find_updated_extents(int fd, u64 root_id, u64 oldest_gen,
-				     u64 *max_gen_found,
-				     subvol_changed_cb *callback)
+				struct name_lookup_cache *cache, void *priv);
+static int subvol_find_updated_extents(int fd, u64 root_id,
+				       u64 oldest_gen,
+				       u64 *max_gen_found, u64 objectid,
+				       subvol_changed_cb *callback, void *priv)
 {
 	int ret;
 	struct btrfs_ioctl_search_args args;
@@ -273,7 +294,11 @@ static int subvol_find_updated_extents(int fd, u64 root_id, u64 oldest_gen,
 	 * set all the other params to the max, we'll take any objectid
 	 * and any trans
 	 */
-	sk->max_objectid = (u64)-1;
+	if (objectid) {
+		sk->min_objectid = objectid;
+		sk->max_objectid = objectid;
+	} else
+		sk->max_objectid = (u64)-1;
 	sk->max_offset = (u64)-1;
 	sk->max_transid = (u64)-1;
 	sk->max_type = BTRFS_EXTENT_DATA_KEY;
@@ -316,8 +341,11 @@ static int subvol_find_updated_extents(int fd, u64 root_id, u64 oldest_gen,
 			found_gen = btrfs_stack_file_extent_generation(item);
 			if (sh.type == BTRFS_EXTENT_DATA_KEY &&
 			    found_gen >= oldest_gen) {
-				callback(root_id, fd, &sh, item,
-					 found_gen, &cache);
+				int stop;
+				stop = callback(root_id, fd, &sh, item,
+						found_gen, &cache, priv);
+				if (stop)
+					goto out;
 			}
 			off += sh.len;
 
@@ -339,11 +367,101 @@ static int subvol_find_updated_extents(int fd, u64 root_id, u64 oldest_gen,
 		} else
 			break;
 	}
+out:
 	if (cache.dir_name)
 		free(cache.dir_name);
 	if (cache.full_name)
 		free(cache.full_name);
-	*max_gen_found = max_found;
+	if (*max_gen_found)
+		*max_gen_found = max_found;
+	return ret;
+}
+
+static uint64_t extent_len_from_item(struct btrfs_file_extent_item *item)
+{
+	uint64_t len = 0;
+	unsigned int type;
+
+	type = btrfs_stack_file_extent_type(item);
+
+	if (type == BTRFS_FILE_EXTENT_REG ||
+	    type == BTRFS_FILE_EXTENT_PREALLOC)
+		len = btrfs_stack_file_extent_num_bytes(item);
+	else if (type == BTRFS_FILE_EXTENT_INLINE)
+		len = btrfs_stack_file_extent_ram_bytes(item);
+	else
+		fprintf(stderr, "WARNING: Unexpected extent type: %u\n", type);
+
+	return len;
+}
+
+struct check_filerec_priv {
+	uint64_t	subvol_gen;
+	struct filerec	*file;
+	int             changed;
+};
+
+static int check_filerec_cb(uint64_t subvolid, int fd,
+			    struct btrfs_ioctl_search_header *sh,
+			    struct btrfs_file_extent_item *item,
+			    u64 found_gen,
+			    struct name_lookup_cache *cache, void *priv)
+{
+	uint64_t ino = sh->objectid;
+	uint64_t off = sh->offset;
+	uint64_t len = extent_len_from_item(item);
+	struct check_filerec_priv *fp = priv;
+	struct filerec *file = fp->file;
+
+	printf("file: %s subvol: %"PRIu64" ino: %"PRIu64" gen: %"PRIu64" changed from "
+	       "%"PRIu64" to %"PRIu64"\n", file->filename, subvolid, ino, found_gen, off,
+	       len);
+
+	if (found_gen > fp->subvol_gen) {
+		fp->changed = 1;
+		return 1;
+	}
+	return 0;
+}
+
+int btrfs_check_file_changed(struct filerec *file, int *ret_changed)
+{
+	int ret;
+	struct btrfs_subvol *sub;
+	struct check_filerec_priv priv = {0, };
+
+	abort_on(!filerec_meta_uptodate(file));
+
+	sub = find_btrfs_subvol_rb(file->subvolid);
+	if (!sub) {
+		printf("file %s has unknown subvolid %"PRIu64"\n",
+		       file->filename, file->subvolid);
+		priv.changed = 1;
+		ret = 0;
+		goto out;
+	}
+
+	ret = filerec_open(file, 0);
+	if (ret)
+		goto out;
+
+	priv.subvol_gen = sub->subvol_gen;
+	priv.file = file;
+	ret = subvol_find_updated_extents(file->fd, sub->subvol_id,
+					  sub->subvol_gen, NULL, file->inum,
+					  check_filerec_cb, &priv);
+	if (ret) {
+		fprintf(stderr,
+			"Error %d while checking extent generations for file "
+			"\"%s\": %s\n", ret, file->filename, strerror(ret));
+		priv.changed = 1;
+		ret = 0;
+		goto out;
+	}
+
+out:
+	if (!ret)
+		*ret_changed = priv.changed;
 	return ret;
 }
 
@@ -385,7 +503,8 @@ unsigned int blocksize;
 
 static enum {
 	FIND_NEW,
-	SHOW_CHANGES
+	SHOW_CHANGES,
+	TRANSID,
 } action;
 
 static int parse_opts(int argc, char **argv)
@@ -406,6 +525,13 @@ static int parse_opts(int argc, char **argv)
 		path = strdup(argv[2]);
 		abort_on(!path);
 		action = SHOW_CHANGES;
+	} else if (strcmp(argv[1], "transid") == 0) {
+		if (argc != 4)
+			return -1;
+		path = strdup(argv[2]);
+		abort_on(!path);
+		gen = atoll(argv[3]);
+		action = TRANSID;
 	} else {
 		return -1;
 	}
@@ -413,29 +539,11 @@ static int parse_opts(int argc, char **argv)
 	return 0;
 }
 
-static uint64_t extent_len_from_item(struct btrfs_file_extent_item *item)
-{
-	uint64_t len = 0;
-	unsigned int type;
-
-	type = btrfs_stack_file_extent_type(item);
-
-	if (type == BTRFS_FILE_EXTENT_REG ||
-	    type == BTRFS_FILE_EXTENT_PREALLOC)
-		len = btrfs_stack_file_extent_num_bytes(item);
-	else if (type == BTRFS_FILE_EXTENT_INLINE)
-		len = btrfs_stack_file_extent_ram_bytes(item);
-	else
-		fprintf(stderr, "WARNING: Unexpected extent type: %u\n", type);
-
-	return len;
-}
-
 int show_live_changes(uint64_t subvolid, int fd,
 		      struct btrfs_ioctl_search_header *sh,
 		      struct btrfs_file_extent_item *item,
 		      u64 found_gen,
-		      struct name_lookup_cache *cache)
+		      struct name_lookup_cache *cache, void *priv)
 {
 	struct filerec *file;
 	uint64_t ino = sh->objectid;
@@ -482,8 +590,8 @@ static int show_one_subvol_changes(struct btrfs_subvol *subvol)
 	}
 
 	ret = subvol_find_updated_extents(fd, subvol->subvol_id,
-					  subvol->subvol_gen, &max_gen,
-					  show_live_changes);
+					  subvol->subvol_gen, &max_gen, 0,
+					  show_live_changes, NULL);
 	if (ret)
 		fprintf(stderr, "Error %d finding changes\n", ret);
 
@@ -516,7 +624,7 @@ static int do_show_changes(char *hashfile)
 		return ret;
 	}
 
-	ret = read_hash_tree(hashfile, &tree, &blocksize, NULL, 0, NULL);
+	ret = read_hash_tree(hashfile, &tree, &blocksize, NULL, 0, NULL, 0);
 	if (ret) {
 		fprintf(stderr,
 			"Error %d reading hashfile \"%s\".\n", ret, hashfile);
@@ -540,7 +648,7 @@ int print_changes(uint64_t subvolid, int fd,
 		  struct btrfs_ioctl_search_header *sh,
 		  struct btrfs_file_extent_item *item,
 		  u64 found_gen,
-		  struct name_lookup_cache *cache)
+		  struct name_lookup_cache *cache, void *priv)
 {
 	return print_one_extent(fd, sh, item, found_gen, &cache->dirid,
 				&cache->dir_name, &cache->ino,
@@ -571,8 +679,8 @@ static int do_find_new(char *subvol_path, uint64_t subvol_gen)
 		return -1;
 	}
 
-	ret = subvol_find_updated_extents(fd, 0, subvol_gen, &max_gen,
-					  print_changes);
+	ret = subvol_find_updated_extents(fd, 0, subvol_gen, &max_gen, 0,
+					  print_changes, NULL);
 	if (ret) {
 		fprintf(stderr, "Error %d finding changes\n", ret);
 		return ret;
@@ -582,6 +690,66 @@ static int do_find_new(char *subvol_path, uint64_t subvol_gen)
 	return 0;
 }
 
+static int changed = 0;
+static int show_file_transid_cb(uint64_t subvolid, int fd,
+				struct btrfs_ioctl_search_header *sh,
+				struct btrfs_file_extent_item *item,
+				u64 found_gen,
+				struct name_lookup_cache *cache, void *priv)
+{
+	uint64_t ino = sh->objectid;
+	uint64_t off = sh->offset;
+	uint64_t len = extent_len_from_item(item);
+
+	printf("subvol: %"PRIu64" ino: %"PRIu64" gen: %"PRIu64" changed from "
+	       "%"PRIu64" to %"PRIu64"\n", subvolid, ino, found_gen, off,
+	       len);
+
+	changed++;
+
+	return 0;
+}
+
+static int do_show_file_transid(char *path, uint64_t subvol_gen)
+{
+	int ret, fd;
+	uint64_t ino, subvolid;
+	struct stat st;
+	u64 max_gen; /* ignored */
+
+	fd = open(path, O_RDONLY);
+	if (fd == -1) {
+		ret = errno;
+		fprintf(stderr, "Could not open \"%s\"\n", path);
+		return ret;
+	}
+
+	ret = fstat(fd, &st);
+	if (ret) {
+		ret = errno;
+		fprintf(stderr, "Error %d while statting \"%s\": %s\n", ret,
+			path, strerror(ret));
+		goto out;
+	}
+
+	ino = st.st_ino;
+
+	ret = __lookup_btrfs_subvolid(fd, &subvolid);
+	if (ret) {
+		fprintf(stderr, "Could not find subvol for \"%s\"\n", path);
+		goto out;
+	}
+
+	ret = subvol_find_updated_extents(fd, subvolid, subvol_gen, &max_gen,
+					  ino, show_file_transid_cb, NULL);
+	if (ret)
+		fprintf(stderr, "Error %d: %s\n", ret, strerror(ret));
+out:
+	close(fd);
+
+	return ret;
+}
+
 int main(int argc, char **argv)
 {
 	int ret;
@@ -589,7 +757,8 @@ int main(int argc, char **argv)
 	if (parse_opts(argc, argv)) {
 		printf("tests duperemove btrfs functions.\nUsage:\n"
 		       "btrfs-util find-new subvolume last-gen\n"
-		       "btrfs-util show-changes hashfile\n");
+		       "btrfs-util show-changes hashfile\n"
+		       "btrfs-util transid filename last-gen\n");
 		return 1;
 	}
 
@@ -599,6 +768,9 @@ int main(int argc, char **argv)
 		break;
 	case SHOW_CHANGES:
 		ret = do_show_changes(path);
+		break;
+	case TRANSID:
+		ret = do_show_file_transid(path, gen);
 		break;
 	default:
 		abort_lineno();

@@ -261,16 +261,131 @@ int add_file(const char *name, int dirfd)
 		goto out;
 	}
 
-	file = filerec_new(abspath, st.st_ino, subvolid);
+	file = filerec_new(abspath, st.st_ino, subvolid, on_btrfs);
 	if (file == NULL) {
 		fprintf(stderr, "Out of memory while allocating file record "
 			"for: %s\n", path);
 		return ENOMEM;
 	}
 
+	/*
+	 * We just called stat on the file, so set metadata up to
+	 * date. Data has not been read yet though so mark it as
+	 * needing to be rehashed.
+	 */
+	filerec_set_meta_uptodate(file);
+	filerec_clear_data_uptodate(file);
 out:
 	pathp = pathtmp;
 	return 0;
+}
+
+
+/*
+ * revalidate a filerec. We look for:
+ *    - does it still exist (validates path, subvol, ino)
+ *    - did it change size
+ *      - the find-new code does this too however it can not detect files
+ *        that have shrunk.
+ */
+static int revalidate_filerec(struct filerec *file)
+{
+	int ret, on_btrfs;
+	struct stat st;
+	uint64_t subvolid;
+
+	ret = stat(file->filename, &st);
+	if (!ret) {
+		/* No longer exists or we don't have permission? */
+		filerec_free(file);
+		return 0;
+	}
+
+	if (S_ISDIR(st.st_mode) || !S_ISREG(st.st_mode)) {
+		filerec_free(file);
+		return 0;
+	}
+
+	ret = filerec_open(file, 0);
+	if (ret) {
+		filerec_free(file);
+		return 0;
+	}
+
+	ret = check_file_btrfs(file->fd, &on_btrfs);
+	if (ret)
+		goto out_close;
+
+	if (on_btrfs) {
+		ret = find_btrfs_subvol_from_file(file->fd, file->filename,
+						  &subvolid);
+		if (ret) {
+//			close(fd);
+			fprintf(stderr,
+				"Error %d: %s while finding subvolid for file "
+				"\"%s\". Skipping.\n", ret, strerror(ret),
+				path);
+			goto out_close;
+		}
+
+		if (subvolid != file->subvolid)
+			goto out_revalidate;
+	}
+
+	if (!!on_btrfs != filerec_btrfs(file))
+		goto out_revalidate;
+
+	if (file->inum != st.st_ino)
+		goto out_revalidate;
+
+out_close:
+	filerec_close(file);
+	return ret;
+
+out_revalidate:
+	filerec_close(file);
+	filerec_rehash(file, st.st_ino, subvolid, on_btrfs);
+//	filerec_free(file);
+	return 0;
+}
+
+/*
+ * Revalidate filerec metadata. If a filerec is marked with
+ * meta_uptodate, it is skipped.
+ *
+ * This will also compare transaction ids against our
+ * subvolumes. Filerecs who have not changed will be marked as
+ * data_uptodate. The rest will be caught in our file scan.
+ */
+int revalidate_filerecs(void)
+{
+	int ret = 0;
+	struct filerec *file;
+
+	/* TODO: This should be in inode order? */
+	list_for_each_entry(file, &filerec_list, rec_list) {
+		if (!filerec_meta_uptodate(file)) {
+			ret = revalidate_filerec(file);
+			if (ret)
+				return ret;
+			filerec_set_meta_uptodate(file);
+		}
+
+		filerec_clear_data_uptodate(file);
+
+		if (filerec_btrfs(file)) {
+			int changed = 0;
+
+			ret = btrfs_check_file_changed(file, &changed);
+			if (ret)
+				return ret;
+
+			if (!changed)
+				filerec_set_data_uptodate(file);
+		}
+	}
+
+	return ret;
 }
 
 static GThreadPool *setup_pool(void *location, GMutex *mutex,
@@ -306,13 +421,15 @@ static void run_pool(GThreadPool *pool)
 	printf("Using %u threads for file hashing phase\n", io_threads);
 
 	list_for_each_entry_safe(file, tmp, &filerec_list, rec_list) {
-		g_thread_pool_push(pool, file, &err);
-		if (err != NULL) {
-			fprintf(stderr,
+		if (!filerec_data_uptodate(file)) {
+			g_thread_pool_push(pool, file, &err);
+			if (err != NULL) {
+				fprintf(stderr,
 					"g_thread_pool_push: %s\n",
 					err->message);
-			g_error_free(err);
-			err = NULL;
+				g_error_free(err);
+				err = NULL;
+			}
 		}
 	}
 

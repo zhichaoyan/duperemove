@@ -131,6 +131,7 @@ int write_file_info(int fd, struct filerec *file)
 	finfo.file_size = 0ULL; /* We don't store this yet */
 	finfo.num_blocks = cpu_to_le64(file->num_blocks);
 	finfo.subvolid = cpu_to_le64(file->subvolid);
+	finfo.on_btrfs = cpu_to_le16(filerec_btrfs(file));
 
 	name_len = strlen(file->filename);
 	finfo.name_len = cpu_to_le16(name_len);
@@ -319,7 +320,7 @@ static int read_hash(int fd, struct block_hash *b)
 }
 
 static int read_one_file(int fd, struct hash_tree *tree,
-				struct rb_root *scan_tree)
+			 struct rb_root *scan_tree, int mark_uptodate)
 {
 	int ret;
 	uint32_t i;
@@ -338,9 +339,18 @@ static int read_one_file(int fd, struct hash_tree *tree,
 	dprintf("Load %"PRIu64" hashes for \"%s\"\n", num_blocks, fname);
 
 	file = filerec_new(fname, le64_to_cpu(finfo.ino),
-			   le64_to_cpu(finfo.subvolid));
+			   le64_to_cpu(finfo.subvolid),
+			   le16_to_cpu(finfo.on_btrfs));
 	if (file == NULL)
 		return ENOMEM;
+	/*
+	 * We are reading a file that was just written so, trust the
+	 * values to be good.
+	 */
+	if (mark_uptodate) {
+		filerec_set_meta_uptodate(file);
+		filerec_set_data_uptodate(file);
+	}
 
 	for (i = 0; i < num_blocks; i++) {
 		ret = read_hash(fd, &bhash);
@@ -441,7 +451,7 @@ static int read_subvol_info(int fd, uint64_t subvol_info_off,
 
 int read_hash_tree(char *filename, struct hash_tree *tree,
 		   unsigned int *block_size, struct hash_file_header *ret_hdr,
-		   int ignore_hash_type, struct rb_root *scan_tree)
+		   int ignore_hash_type, struct rb_root *scan_tree, int recent)
 {
 	int ret, fd;
 	uint32_t i, num_subvol_info;
@@ -498,7 +508,7 @@ int read_hash_tree(char *filename, struct hash_tree *tree,
 	}
 
 	for (i = 0; i < num_files; i++) {
-		ret = read_one_file(fd, tree, scan_tree);
+		ret = read_one_file(fd, tree, scan_tree, recent);
 		if (ret)
 			goto out;
 	}

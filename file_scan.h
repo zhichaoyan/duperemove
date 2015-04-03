@@ -17,5 +17,6 @@ extern unsigned int io_threads;
 int add_file(const char *name, int dirfd);
 int populate_tree_aim(struct hash_tree *tree);
 int populate_tree_swap(struct rb_root *tree, char *swapfile);
+int revalidate_filerecs(void);
 
 #endif	/* __FILE_SCAN_H__ */

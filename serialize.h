@@ -52,7 +52,8 @@ struct file_info {
 	__le64		num_blocks;
 	__le16		rec_len;
 	__le16		name_len;
-	__le32		pad0;
+	__le16		on_btrfs;
+	__le16		pad0;
 	__le64		subvolid;
 /*20*/	__le64		pad1[2];
 	char		name[0];
@@ -79,9 +80,13 @@ int serialize_hash_tree(char *filename, struct hash_tree *tree,
 #define	FILE_MAGIC_ERROR	1002
 #define	FILE_HASH_TYPE_ERROR	1003
 extern char unknown_hash_type[8];
+/* read_hash_tree 'recent' arg tells us whether this tree was just written */
 int read_hash_tree(char *filename, struct hash_tree *tree,
 		   unsigned int *block_size, struct hash_file_header *ret_hdr,
-		   int ignore_hash_type, struct rb_root *scan_tree);
+		   int ignore_hash_type, struct rb_root *scan_tree, int recent);
+int read_filerecs(char *filename);
+/* Need a variant of read_hash_tree that doesn't make new filerecs */
+
 /* Pretty-prints errors from read_hash_tree for us */
 void print_hash_tree_errcode(FILE *io, char *filename, int ret);
 

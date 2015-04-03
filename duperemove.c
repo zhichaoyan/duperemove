@@ -69,6 +69,7 @@ static enum {
 	H_WRITE,
 	H_UPDATE,
 } use_hashfile = H_NONE;
+
 static char *serialize_fname = NULL;
 unsigned int io_threads;
 int do_lookup_extents = 0;
@@ -326,8 +327,30 @@ int main(int argc, char **argv)
 	printf("use_hashfile: %d\n", use_hashfile);
 
 	switch (use_hashfile) {
-	case H_WRITE:
 	case H_UPDATE:
+		ret = faccessat(AT_FDCWD, serialize_fname, R_OK|W_OK, 0);
+		if (ret == 0) {
+			ret = read_hash_tree(serialize_fname, NULL, &blocksize,
+					     NULL, 0, &digest_tree, 0);
+			if (ret) {
+				print_hash_tree_errcode(stderr, serialize_fname,
+							ret);
+				goto out;
+			}
+
+			ret = revalidate_filerecs();
+			if (ret) {
+				fprintf(stderr,	"Error rescanning filerecs\n");
+				goto out;
+			}
+		} else if (errno != ENOENT) {
+			fprintf(stderr, "Error %d accessing hashfile \"%s\": %s\n",
+				errno, serialize_fname, strerror(errno));
+			goto out;
+		}
+		ret = 0;
+		/* Fall through to write code */
+	case H_WRITE:
 		ret = populate_tree_swap(&digest_tree, serialize_fname);
 		break;
 	case H_READ:
@@ -336,7 +359,7 @@ int main(int argc, char **argv)
 		 * extent-find and dedupe stages
 		 */
 		ret = read_hash_tree(serialize_fname, NULL, &blocksize,
-				     NULL, 0, &digest_tree);
+				     NULL, 0, &digest_tree, 1);
 		if (ret)
 			print_hash_tree_errcode(stderr, serialize_fname,
 						ret);
@@ -376,7 +399,7 @@ int main(int argc, char **argv)
 
 		init_hash_tree(&dups_tree);
 		ret = read_hash_tree(serialize_fname, &dups_tree, &blocksize,
-				     NULL, 0, &digest_tree);
+				     NULL, 0, &digest_tree, 1);
 		if (ret) {
 			print_hash_tree_errcode(stderr, serialize_fname, ret);
 			goto out;

@@ -223,8 +223,28 @@ struct filerec *find_filerec(uint64_t inum, uint64_t subvolid)
 	return NULL;
 }
 
+void filerec_rehash(struct filerec *file, uint64_t inum, uint64_t subvolid,
+		    int on_btrfs)
+{
+
+
+	if (!RB_EMPTY_NODE(&file->inum_node))
+		rb_erase(&file->inum_node, &filerec_by_inum);
+
+	file->inum = inum;
+	file->subvolid = subvolid;
+	file->flags = 0;
+
+	filerec_set_meta_uptodate(file);
+	if (on_btrfs)
+		filerec_set_btrfs(file);
+
+	insert_filerec(file);
+}
+
 static struct filerec *filerec_alloc_insert(const char *filename,
-					    uint64_t inum, uint64_t subvolid)
+					    uint64_t inum, uint64_t subvolid,
+					    int on_btrfs)
 {
 	struct filerec *file = calloc_filerec(1);
 
@@ -244,6 +264,9 @@ static struct filerec *filerec_alloc_insert(const char *filename,
 		file->subvolid = subvolid;
 		file->comparisons = RB_ROOT;
 
+		if (on_btrfs)
+			filerec_set_btrfs(file);
+
 		insert_filerec(file);
 		list_add_tail(&file->rec_list, &filerec_list);
 		num_filerecs++;
@@ -252,11 +275,11 @@ static struct filerec *filerec_alloc_insert(const char *filename,
 }
 
 struct filerec *filerec_new(const char *filename, uint64_t inum,
-			    uint64_t subvolid)
+			    uint64_t subvolid, int on_btrfs)
 {
 	struct filerec *file = find_filerec(inum, subvolid);
 	if (!file)
-		file = filerec_alloc_insert(filename, inum, subvolid);
+		file = filerec_alloc_insert(filename, inum, subvolid, on_btrfs);
 	return file;
 }
 
@@ -710,7 +733,7 @@ int main(int argc, char **argv)
 	}
 
 	for (i = 1; i < argc; i++) {
-		file = filerec_new(argv[i], 500 + i, 1); /* Use made up ino */
+		file = filerec_new(argv[i], 500 + i, 1, 0); /* Use made up ino */
 		if (!file) {
 			fprintf(stderr, "filerec_new(): malloc error\n");
 			return 1;
