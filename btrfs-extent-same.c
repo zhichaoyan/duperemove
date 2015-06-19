@@ -49,34 +49,51 @@ struct btrfs_ioctl_same_extent_info {
 	uint32_t reserved;
 };
 
+#define	BTRFS_SAME_NO_MTIME	0x1
+#define	BTRFS_SAME_FLAGS	(BTRFS_SAME_NO_MTIME)
 struct btrfs_ioctl_same_args {
 	uint64_t logical_offset;	/* in - start of extent in source */
 	uint64_t length;		/* in - length of extent */
 	uint16_t dest_count;		/* in - total elements in info array */
-	uint16_t reserved1;		/* out - number of files that got deduped */
+	uint16_t flags;			/* in - see BTRFS_SAME_FLAGS */
 	uint32_t reserved2;
 	struct btrfs_ioctl_same_extent_info info[0];
 };
 
 static void usage(const char *prog)
 {
-	printf("Usage: %s len file1 loff1 file2 loff2\n", prog);
+	printf("Usage: %s [-m] len file1 loff1 file2 loff2\n", prog);
+	printf("Switches:\n");
+	printf("  -m: no mtime\n");
 }
 
 int main(int argc, char **argv)
 {
-	int ret, src_fd, i, numfiles;
+	int c, ret, src_fd, i, numfiles, args_left;
 	char *srcf, *destf;
 	struct btrfs_ioctl_same_args *same;
 	struct btrfs_ioctl_same_extent_info *info;
 	unsigned long long bytes = 0ULL;
+	unsigned int flags;
 
-	if (argc < 6 || (argc % 2)) {
+	while ((c = getopt(argc, argv, "m")) != -1) {
+		switch (c) {
+		case 'm':
+			flags |= BTRFS_SAME_NO_MTIME;
+			break;
+		default:
+			usage(argv[0]);
+			return 1;
+		}
+	}
+
+	args_left = argc - optind + 1;
+	if (args_left < 6 || (args_left % 2)) {
 		usage(argv[0]);
 		return 1;
 	}
 
-	numfiles = (argc / 2) - 2;
+	numfiles = (args_left / 2) - 2;
 
 	printf("Deduping %d total files\n", numfiles + 1);
 
@@ -86,10 +103,13 @@ int main(int argc, char **argv)
 	if (!same)
 		return -ENOMEM;
 
-	srcf = argv[2];
-	same->length = atoll(argv[1]);
-	same->logical_offset = atoll(argv[3]);
+	printf("argc: %d optind: %d\n", argc, optind);
+
+	srcf = argv[optind + 1];
+	same->length = atoll(argv[optind]);
+	same->logical_offset = atoll(argv[optind + 2]);
 	same->dest_count = numfiles;
+	same->flags = flags;
 
 	ret = open(srcf, O_RDONLY);
 	if (ret < 0) {
@@ -104,7 +124,7 @@ int main(int argc, char **argv)
 	       (unsigned long long)same->length, srcf);
 
 	for (i = 0; i < same->dest_count; i++) {
-		destf = argv[4 + (i * 2)];
+		destf = argv[optind + 3 + (i * 2)];
 
 		ret = open(destf, O_RDONLY);
 		if (ret < 0) {
@@ -115,7 +135,7 @@ int main(int argc, char **argv)
 		}
 
 		same->info[i].fd = ret;
-		same->info[i].logical_offset = atoll(argv[5 + (i * 2)]);
+		same->info[i].logical_offset = atoll(argv[optind + 4 + (i * 2)]);
 		printf("(%llu, %llu): %s\n",
 		       (unsigned long long)same->info[i].logical_offset,
 		       (unsigned long long)same->length, destf);
