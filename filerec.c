@@ -534,14 +534,16 @@ int fiemap_iter_get_flags(struct fiemap_ctxt *ctxt, struct filerec *file,
 			  uint64_t blkno, unsigned int *flags,
 			  unsigned int *hole)
 {
+#if 0
 	int err;
 	uint64_t fiestart = 0;
 	struct fiemap *fiemap;
 	struct fiemap_extent *extent;
-
+#endif
 	*flags = 0;
 	*hole = 0;
 
+#if 0
 	if (ctxt == NULL)
 		return 0;
 	/* we had a previous error or have no more extents to look up */
@@ -614,7 +616,7 @@ int fiemap_iter_get_flags(struct fiemap_ctxt *ctxt, struct filerec *file,
 	}
 
 	*flags = extent->fe_flags;
-
+#endif
 	return 0;
 }
 
@@ -630,6 +632,7 @@ int filerec_count_shared(struct filerec *file, uint64_t start, uint64_t len,
 			 uint64_t *shared_bytes, uint64_t *poff,
 			 uint64_t *first_plen)
 {
+#if 0
 	char buf[16384];
 	struct fiemap *fiemap = (struct fiemap *)buf;
 	struct fiemap_extent *fm_ext = &fiemap->fm_extents[0];
@@ -742,7 +745,7 @@ int filerec_count_shared(struct filerec *file, uint64_t start, uint64_t len,
 
 		start = (fm_ext[i - 1].fe_logical + fm_ext[i - 1].fe_length);
 	} while (last == 0);
-
+#endif
 	return 0;
 }
 
