@@ -17,14 +17,15 @@ re-checksum unchanged data.
 
 Duperemove can also take input from the [fdupes](https://github.com/adrianlopezroche/fdupes) program.
 
-See [the duperemove man page](https://github.com/markfasheh/duperemove/blob/doc-update/duperemove.html) for further details about running duperemove.
+See [the duperemove man page](http://markfasheh.github.io/duperemove/duperemove.html) for further details about running duperemove.
 
 
 # Links of interest
 
-Dupremove has a [Wiki](https://github.com/markfasheh/duperemove/wiki)
-with design and performance documentation.
+[The duperemove wiki](https://github.com/markfasheh/duperemove/wiki)
+has both design and performance documentation.
 
+Duperemove has a [testing project](https://github.com/markfasheh/duperemove-tests).
 
 # Requirements
 
@@ -45,7 +46,7 @@ For bug reports and feature requests please use [the github issue tracker](https
 # Examples
 
 Please see the examples section of [the duperemove man
-page](https://github.com/markfasheh/duperemove/blob/doc-update/duperemove.html#7)
+page](http://markfasheh.github.io/duperemove/duperemove.html#7)
 for a complete set of usage examples, including hashfile usage.
 
 ## A simple example, with program output
