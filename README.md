@@ -15,9 +15,9 @@ for those files which have changed since the last run.  Thus you can run
 duperemove repeatedly on your data as it changes, without having to
 re-checksum unchanged data.
 
-Duperemove can also take input from the fdupes program.
+Duperemove can also take input from the [fdupes](https://github.com/adrianlopezroche/fdupes) program.
 
-See [the duperemove man page](https://github.com/markfasheh/duperemove/tree/duperemove.html) for further details about running duperemove.
+See [the duperemove man page](duperemove.html) for further details about running duperemove.
 
 
 # Links of interest
@@ -45,7 +45,7 @@ For bug reports and feature requests please use [the github issue tracker](https
 # Examples
 
 Please see the examples section of [the duperemove man
-page](https://github.com/markfasheh/duperemove/tree/duperemove.html#7)
+page](duperemove.html#7)
 for a complete set of usage examples, including hashfile usage.
 
 ## A simple example, with program output
