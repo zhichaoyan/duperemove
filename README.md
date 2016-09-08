@@ -20,13 +20,6 @@ Duperemove can also take input from the [fdupes](https://github.com/adrianlopezr
 See [the duperemove man page](http://markfasheh.github.io/duperemove/duperemove.html) for further details about running duperemove.
 
 
-# Links of interest
-
-[The duperemove wiki](https://github.com/markfasheh/duperemove/wiki)
-has both design and performance documentation.
-
-Duperemove has a [testing project](https://github.com/markfasheh/duperemove-tests).
-
 # Requirements
 
 The latest stable code can be found in [v0.10-branch](https://github.com/markfasheh/duperemove/tree/v0.10-branch).
@@ -42,6 +35,7 @@ Please see the FAQ file [provided in the duperemove
 source](https://github.com/markfasheh/duperemove/blob/master/FAQ.md)
 
 For bug reports and feature requests please use [the github issue tracker](https://github.com/markfasheh/duperemove/issues)
+
 
 # Examples
 
@@ -119,3 +113,14 @@ An actual run, output will differ according to duperemove version.
     [0x147f680] Dedupe 2 extents (id: f913dceb) with target: (0.0, 1.5M), "/btrfs/file2"
     Kernel processed data (excludes target files): 4.5M
     Comparison of extent info shows a net change in shared extents of: 5.5M
+
+
+# Links of interest
+
+[The duperemove wiki](https://github.com/markfasheh/duperemove/wiki)
+has both design and performance documentation.
+
+[duperemove-tests](https://github.com/markfasheh/duperemove-tests) has
+a growing assortment of regression tests.
+
+[Duperemove web page](http://markfasheh.github.io/duperemove/)
